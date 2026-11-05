@@ -106,11 +106,14 @@ with st.sidebar:
     DESDE = inicio.isoformat()
     st.divider()
     st.subheader("Agente de IA")
-    api_key = (st.secrets.get("ANTHROPIC_API_KEY", "") if hasattr(st, "secrets") else "") \
-        or os.environ.get("ANTHROPIC_API_KEY", "")
+    try:
+        api_key = st.secrets.get("GEMINI_API_KEY", "")
+    except Exception:  # no existe secrets.toml: es normal en una instalación local
+        api_key = ""
+    api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
-        api_key = st.text_input("Clave de API de Anthropic", type="password",
-                                help="También podés definir ANTHROPIC_API_KEY como variable de entorno.")
+        api_key = st.text_input("Clave de API de Google (Gemini, gratis)", type="password",
+                                help="Se saca gratis en aistudio.google.com → Get API key. También podés definir GEMINI_API_KEY como variable de entorno.")
     if st.button("🔄 Actualizar datos"):
         st.cache_data.clear()
         st.rerun()
@@ -263,7 +266,7 @@ with tab_ia:
             st.markdown(pregunta)
         with st.chat_message("assistant"):
             if not api_key:
-                resp, llamadas = "Falta la clave de API de Anthropic (barra lateral).", []
+                resp, llamadas = "Falta la clave de API de Gemini (barra lateral). Se saca gratis en aistudio.google.com.", []
                 st.warning(resp)
             else:
                 with st.spinner("Consultando los datos…"):

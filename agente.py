@@ -1,68 +1,27 @@
-"""Agente de IA que responde preguntas sobre los indicadores usando herramientas.
+"""Agente de IA (Google Gemini, capa gratuita) que responde preguntas sobre los indicadores.
 
 El modelo NO inventa números: llama a funciones que calculan con pandas sobre los
 datos descargados de la API oficial, y luego redacta la respuesta.
+Si un modelo está saturado (503) o no existe (404), reintenta y prueba con otro.
 """
-from __future__ import annotations
-
-import json
+import time
 from datetime import date
 
 import pandas as pd
 
 from datos import agregar_anual, transformar
 
-MODELO = "claude-sonnet-5-5"
 MAX_FILAS = 80
+TRANSITORIOS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED", "500", "INTERNAL", "DEADLINE")
+EXCLUIR = ("image", "tts", "live", "audio", "embedding", "robotics", "computer-use", "thinking-exp")
 
-TRANS = ["nivel", "var_periodo", "var_interanual"]
-AGREG = ["ninguna", "promedio_anual", "fin_anual", "suma_anual", "max_anual"]
-
-
-def herramientas(nombres: list[str]) -> list[dict]:
-    ind = {"type": "string", "enum": nombres, "description": "Nombre exacto del indicador."}
-    trans = {"type": "string", "enum": TRANS, "default": "nivel",
-             "description": "nivel = valor tal cual; var_periodo = variación % vs. período anterior; "
-                            "var_interanual = variación % vs. mismo período del año anterior."}
-    agreg = {"type": "string", "enum": AGREG, "default": "ninguna",
-             "description": "Agregación anual aplicada DESPUÉS de la transformación. Para la inflación anual "
-                            "usar var_interanual + fin_anual (variación diciembre a diciembre)."}
-    fechas = {
-        "desde": {"type": "string", "description": "YYYY-MM-DD (opcional)."},
-        "hasta": {"type": "string", "description": "YYYY-MM-DD (opcional)."},
-    }
-    return [
-        {"name": "listar_indicadores",
-         "description": "Lista indicadores disponibles con unidad, frecuencia y rango de fechas.",
-         "input_schema": {"type": "object", "properties": {}}},
-        {"name": "consultar_serie",
-         "description": f"Devuelve valores de un indicador (máx. {MAX_FILAS} filas, las más recientes).",
-         "input_schema": {"type": "object", "properties": {
-             "indicador": ind, "transformacion": trans, "agregacion": agreg, **fechas},
-             "required": ["indicador"]}},
-        {"name": "estadisticas",
-         "description": "Estadísticas de un indicador en un rango: primer/último valor, variación acumulada, "
-                        "media, mediana, máximo y mínimo con fechas, y variación promedio por período.",
-         "input_schema": {"type": "object", "properties": {
-             "indicador": ind, "transformacion": trans, **fechas}, "required": ["indicador"]}},
-        {"name": "ranking",
-         "description": "Ordena períodos (o años si hay agregación) por valor. Sirve para 'año con mayor/menor X'.",
-         "input_schema": {"type": "object", "properties": {
-             "indicador": ind, "transformacion": trans, "agregacion": agreg, **fechas,
-             "n": {"type": "integer", "default": 5},
-             "orden": {"type": "string", "enum": ["desc", "asc"], "default": "desc"}},
-             "required": ["indicador"]}},
-        {"name": "comparar",
-         "description": "Tabla de uno o más indicadores para varios años (ej. exportaciones vs importaciones).",
-         "input_schema": {"type": "object", "properties": {
-             "indicadores": {"type": "array", "items": ind},
-             "anios": {"type": "array", "items": {"type": "integer"}},
-             "transformacion": trans,
-             "agregacion": {**agreg, "default": "suma_anual"}},
-             "required": ["indicadores", "anios"]}},
-    ]
+_CTX: dict = {}
+LLAMADAS: list = []
 
 
+# ----------------------------------------------------------------------------
+# Cálculos (los hace pandas, no el modelo)
+# ----------------------------------------------------------------------------
 def _serie(ctx, nombre: str, trans: str, desde=None, hasta=None) -> pd.Series:
     df, _ = ctx["cargar"](nombre)
     s = transformar(df["valor"], trans)
@@ -77,7 +36,7 @@ def _fmt_idx(i) -> str:
     return str(i.date()) if hasattr(i, "date") else str(i)
 
 
-def _filas(s: pd.Series) -> list[dict]:
+def _filas(s: pd.Series) -> list:
     return [{"periodo": _fmt_idx(i), "valor": round(float(v), 4)} for i, v in s.items()]
 
 
@@ -134,7 +93,60 @@ def ejecutar(nombre_tool: str, a: dict, ctx: dict):
     return {"error": f"Herramienta desconocida: {nombre_tool}"}
 
 
-def sistema(nombres: list[str]) -> str:
+# ----------------------------------------------------------------------------
+# Herramientas que Gemini puede llamar (lee los tipos y la descripción de cada función)
+# ----------------------------------------------------------------------------
+def _correr(nombre: str, **args) -> dict:
+    args = {k: v for k, v in args.items() if v not in ("", None)}
+    LLAMADAS.append({"herramienta": nombre, "argumentos": args})
+    try:
+        res = ejecutar(nombre, args, _CTX)
+    except Exception as e:
+        return {"error": str(e)}
+    return res if isinstance(res, dict) else {"resultado": res}
+
+
+def listar_indicadores() -> dict:
+    """Lista los indicadores disponibles con unidad, frecuencia y rango de fechas."""
+    return _correr("listar_indicadores")
+
+
+def consultar_serie(indicador: str, transformacion: str = "nivel", agregacion: str = "ninguna",
+                    desde: str = "", hasta: str = "") -> dict:
+    """Devuelve valores de un indicador (máx. 80 filas, las más recientes).
+    indicador: nombre exacto del indicador (usar listar_indicadores si hay dudas).
+    transformacion: 'nivel', 'var_periodo' (% vs período anterior) o 'var_interanual' (% vs mismo período del año anterior).
+    agregacion: 'ninguna', 'promedio_anual', 'fin_anual', 'suma_anual' o 'max_anual'.
+    Inflación anual = var_interanual + fin_anual. desde, hasta: fechas YYYY-MM-DD opcionales."""
+    return _correr("consultar_serie", indicador=indicador, transformacion=transformacion,
+                   agregacion=agregacion, desde=desde, hasta=hasta)
+
+
+def estadisticas(indicador: str, transformacion: str = "nivel", desde: str = "", hasta: str = "") -> dict:
+    """Primer y último valor, media, mediana, máximo, mínimo (con fechas) y variación promedio por período
+    de un indicador en un rango. transformacion: 'nivel', 'var_periodo' o 'var_interanual'.
+    desde, hasta: fechas YYYY-MM-DD opcionales."""
+    return _correr("estadisticas", indicador=indicador, transformacion=transformacion, desde=desde, hasta=hasta)
+
+
+def ranking(indicador: str, transformacion: str = "nivel", agregacion: str = "ninguna", n: int = 5,
+            orden: str = "desc", desde: str = "", hasta: str = "") -> dict:
+    """Ordena períodos o años por valor. Sirve para 'año con mayor o menor X'.
+    orden: 'desc' (mayor primero) o 'asc'.
+    Para inflación anual usar transformacion='var_interanual' y agregacion='fin_anual'."""
+    return _correr("ranking", indicador=indicador, transformacion=transformacion, agregacion=agregacion,
+                   n=n, orden=orden, desde=desde, hasta=hasta)
+
+
+def comparar(indicadores: list[str], anios: list[int], transformacion: str = "nivel",
+             agregacion: str = "suma_anual") -> dict:
+    """Tabla de uno o más indicadores para varios años (ej. exportaciones vs importaciones).
+    agregacion: 'suma_anual', 'promedio_anual', 'fin_anual' o 'max_anual'."""
+    return _correr("comparar", indicadores=indicadores, anios=anios, transformacion=transformacion,
+                   agregacion=agregacion)
+
+
+def sistema(nombres: list) -> str:
     return (
         "Sos un asistente de economía argentina dentro de una app de indicadores macroeconómicos. "
         f"Hoy es {date.today().isoformat()}. Respondé en español, de forma clara y breve. "
@@ -146,34 +158,49 @@ def sistema(nombres: list[str]) -> str:
     )
 
 
-def preguntar(api_key: str, pregunta: str, historial: list[dict], nombres: list[str], cargar_fn) -> tuple[str, list[dict]]:
-    """Corre el bucle de herramientas. Devuelve (respuesta, llamadas_realizadas)."""
-    import anthropic
+def _modelos(client) -> list:
+    """Modelos 'flash' disponibles hoy (los nombres cambian seguido), más nuevos primero."""
+    try:
+        nombres = {m.name.replace("models/", "") for m in client.models.list()
+                   if "flash" in m.name and "generateContent" in (getattr(m, "supported_actions", None) or [])
+                   and not any(x in m.name for x in EXCLUIR)}
+        if nombres:
+            return sorted(nombres, reverse=True)[:4]
+    except Exception:
+        pass
+    return ["gemini-flash-latest", "gemini-2.5-flash"]
 
-    client = anthropic.Anthropic(api_key=api_key)
-    ctx = {"cargar": cargar_fn, "nombres": nombres}
-    mensajes = [*historial, {"role": "user", "content": pregunta}]
-    llamadas: list[dict] = []
 
-    for _ in range(8):
-        resp = client.messages.create(model=MODELO, max_tokens=1500, system=sistema(nombres),
-                                      tools=herramientas(nombres), messages=mensajes)
-        if resp.stop_reason != "tool_use":
-            texto = "".join(b.text for b in resp.content if b.type == "text").strip()
-            return texto or "No pude generar una respuesta.", llamadas
+def preguntar(api_key: str, pregunta: str, historial: list, nombres: list, cargar_fn):
+    """Devuelve (respuesta, llamadas_realizadas)."""
+    from google import genai
+    from google.genai import types
 
-        mensajes.append({"role": "assistant", "content": resp.content})
-        resultados = []
-        for b in resp.content:
-            if b.type != "tool_use":
-                continue
+    client = genai.Client(api_key=api_key)
+    _CTX.clear()
+    _CTX.update({"cargar": cargar_fn, "nombres": nombres})
+
+    contenidos = [types.Content(role=("user" if m["role"] == "user" else "model"),
+                                parts=[types.Part(text=m["content"])]) for m in historial]
+    contenidos.append(types.Content(role="user", parts=[types.Part(text=pregunta)]))
+    cfg = types.GenerateContentConfig(
+        system_instruction=sistema(nombres), temperature=0,
+        tools=[listar_indicadores, consultar_serie, estadisticas, ranking, comparar])
+
+    ultimo = None
+    for modelo in _modelos(client):
+        for intento in range(3):
+            LLAMADAS.clear()
             try:
-                res = ejecutar(b.name, b.input, ctx)
-                contenido, error = json.dumps(res, ensure_ascii=False), False
+                resp = client.models.generate_content(model=modelo, contents=contenidos, config=cfg)
+                return (resp.text or "No pude generar una respuesta."), list(LLAMADAS)
             except Exception as e:
-                contenido, error = f"Error: {e}", True
-            llamadas.append({"herramienta": b.name, "argumentos": b.input})
-            resultados.append({"type": "tool_result", "tool_use_id": b.id, "content": contenido, "is_error": error})
-        mensajes.append({"role": "user", "content": resultados})
-
-    return "La consulta requirió demasiados pasos. Probá con una pregunta más acotada.", llamadas
+                ultimo = e
+                txt = str(e)
+                if "API_KEY_INVALID" in txt or "API key not valid" in txt:
+                    raise RuntimeError("La clave de API no es válida. Revisá que la copiaste completa.")
+                if any(c in txt for c in TRANSITORIOS):
+                    time.sleep(3 * (intento + 1))   # servicio saturado: esperar y reintentar
+                    continue
+                break                                  # p. ej. 404: probar con el siguiente modelo
+    raise RuntimeError(f"Gemini no respondió después de varios intentos. Probá de nuevo en un minuto. Último error: {ultimo}")
