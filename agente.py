@@ -22,8 +22,23 @@ LLAMADAS: list = []
 # ----------------------------------------------------------------------------
 # Cálculos (los hace pandas, no el modelo)
 # ----------------------------------------------------------------------------
+def _resolver(ctx, nombre: str) -> str:
+    """Acepta el nombre aunque el modelo lo escriba distinto (mayúsculas, parte del nombre)."""
+    nombres = ctx["nombres"]
+    if nombre in nombres:
+        return nombre
+    n = str(nombre).strip().lower()
+    for x in nombres:
+        if x.lower() == n:
+            return x
+    cand = [x for x in nombres if n in x.lower() or x.lower() in n]
+    if len(cand) == 1:
+        return cand[0]
+    raise ValueError(f"Indicador '{nombre}' no reconocido. Disponibles: {'; '.join(nombres)}")
+
+
 def _serie(ctx, nombre: str, trans: str, desde=None, hasta=None) -> pd.Series:
-    df, _ = ctx["cargar"](nombre)
+    df, _ = ctx["cargar"](_resolver(ctx, nombre))
     s = transformar(df["valor"], trans)
     if desde:
         s = s[s.index >= pd.Timestamp(desde)]
