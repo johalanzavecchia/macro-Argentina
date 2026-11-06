@@ -25,7 +25,7 @@ FONDO, PANEL, GRIS, GRIS_CLARO, BLANCO = "#140A2A", "#1F1340", "#3B2A6B", "#A9A3
 MAGENTA, MAGENTA_CLARO = "#A8208F", "#D14BBE"
 LINEAS = ["#FF4D4D", "#4DA3FF", "#FFD23F", "#3DDC84", "#FF9F43", "#26D0CE", "#F78FB3", "#B8E986"]
 
-st.set_page_config(page_title="Macro Argentina", page_icon="📊", layout="wide")
+st.set_page_config(page_title="Macroeconomía Argentina", page_icon="📊", layout="wide")
 
 st.markdown(f"""
 <style>
@@ -118,7 +118,7 @@ def recortar(s: pd.Series, d0: date, d1: date) -> pd.Series:
 # ----------------------------------------------------------------------------
 # Encabezado y barra lateral
 # ----------------------------------------------------------------------------
-st.markdown('<h1>Macro <span class="acento">Argentina</span></h1>', unsafe_allow_html=True)
+st.markdown('<h1>Macroeconomía <span class="acento">Argentina</span></h1>', unsafe_allow_html=True)
 st.caption("Datos oficiales obtenidos en vivo: BCRA (API de Principales Variables y Estadísticas Cambiarias) e INDEC "
            "(series publicadas por la API de Series de Tiempo de datos.gob.ar). Sin carga manual.")
 
@@ -351,13 +351,37 @@ with tab_exp:
             except Exception as e:
                 st.session_state["chequeo"] = f"No se pudo calcular el chequeo: {e}"
     if "verif" in st.session_state:
-        st.dataframe(st.session_state["verif"], use_container_width=True, hide_index=True)
+        v = st.session_state["verif"]
+        st.dataframe(v, use_container_width=True, hide_index=True)
+        for _, f in v[v["Estado"] != "OK"].iterrows():
+            with st.expander(f"{f['Indicador']} — {f['Estado']}"):
+                st.write(f"Serie usada: {f.get('Serie usada')}  ·  Título oficial: {f.get('Título oficial')}")
+                st.write(f"Último dato: {f.get('Último dato')}  ·  Atraso (días): {f.get('Atraso (días)')}")
+                st.write(f"Detalle: {f.get('Notas')}")
     if "chequeo" in st.session_state:
         st.markdown("**Chequeo de la inflación contra cifras publicadas por el INDEC (diciembre a diciembre)**")
         if isinstance(st.session_state["chequeo"], str):
             st.warning(st.session_state["chequeo"])
         else:
             st.dataframe(st.session_state["chequeo"], use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("Series candidatas de un indicador")
+    st.caption("Si una serie no es la correcta, acá se ven las opciones oficiales (id, título, unidad y último dato) "
+               "para elegir la adecuada.")
+    cat_total = catalogo_total()
+    opciones = [n for n in NOMBRES if "derivada" not in cat_total[n]]
+    ind_c = st.selectbox("Indicador", opciones, key="cand_ind")
+    if st.button("Ver series candidatas"):
+        with st.spinner("Buscando en el catálogo oficial…"):
+            st.session_state["cand"] = (ind_c, datos.candidatos(ind_c))
+    if "cand" in st.session_state:
+        nombre_c, tabla_c = st.session_state["cand"]
+        st.markdown(f"**Candidatas para:** {nombre_c}")
+        if len(tabla_c):
+            st.dataframe(tabla_c, use_container_width=True, hide_index=True)
+        else:
+            st.info("No hay candidatas para este indicador.")
 
     st.divider()
     st.subheader("Buscar otras series en el catálogo oficial")

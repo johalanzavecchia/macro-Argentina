@@ -35,6 +35,15 @@ def main():
             print(f"  Título oficial: {f.get('Título oficial', '')}")
             print(f"  Notas: {f.get('Notas', '')}")
 
+        print("\n=== SERIES CANDIDATAS PARA LOS INDICADORES A REVISAR ===")
+        for nombre in problemas["Indicador"]:
+            try:
+                cand = datos.candidatos(nombre, 15)
+                print(f"\n- {nombre}")
+                print(cand.head(15).to_string(index=False) if len(cand) else "  (sin candidatas)")
+            except Exception as e:
+                print(f"\n- {nombre}: no se pudo listar candidatas ({e})")
+
     print("\n=== CHEQUEO DE INFLACION (dic/dic) CONTRA CIFRAS DEL INDEC ===")
     try:
         chequeo = datos.chequeos_inflacion()

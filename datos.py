@@ -2,7 +2,7 @@
 
 Fuentes
 -------
-* BCRA - API "Principales Variables" v3.0   https://api.bcra.gob.ar/estadisticas/v3.0/monetarias
+* BCRA - API "Principales Variables" v4.0 (con v3.0 de respaldo)   https://api.bcra.gob.ar/estadisticas/v4.0/monetarias
         (tipo de cambio de referencia, reservas internacionales, base monetaria)
 * BCRA - API "Estadísticas Cambiarias" v1.0 https://api.bcra.gob.ar/estadisticascambiarias/v1.0
         (cotización del dólar; respaldo del anterior)
@@ -36,7 +36,9 @@ except Exception:  # pragma: no cover
 
 
 SERIES_API = "https://apis.datos.gob.ar/series/api"
-BCRA_VAR = "https://api.bcra.gob.ar/estadisticas/v3.0/monetarias"
+# Principales Variables: se prueba primero la v4.0 y, si no responde, la v3.0
+BCRA_VAR_VERSIONES = ("https://api.bcra.gob.ar/estadisticas/v4.0/monetarias",
+                      "https://api.bcra.gob.ar/estadisticas/v3.0/monetarias")
 BCRA_COT = "https://api.bcra.gob.ar/estadisticascambiarias/v1.0/Cotizaciones"
 FECHA_INICIO_DEFECTO = "2000-01-01"
 
@@ -76,7 +78,6 @@ NOM_EXP = "Comercio - exportaciones"
 NOM_IMP = "Comercio - importaciones"
 NOM_RES = "Reservas internacionales (BCRA)"
 NOM_BM = "Base monetaria (BCRA)"
-NOM_DEU = "Deuda bruta de la Administración Central"
 
 _EXCL_IPC = ("region", "gba", "cuyo", "noa", "nea", "patagonia", "pampeana", "nucleo", "regulados",
              "estacional", "variacion", "incidencia")
@@ -110,7 +111,9 @@ CATALOGO: dict = {
     NOM_PBI: {
         "cat": "Actividad", "fuente": "INDEC", "unidad": "Millones de pesos constantes",
         "indec": {"ids": (),
-                  "busquedas": ("PIB a precios de mercado precios constantes trimestral",
+                  "busquedas": ("producto interno bruto millones de pesos de 2004 trimestral",
+                                "oferta global PIB pesos de 2004 trimestral",
+                                "PIB a precios de mercado precios constantes trimestral",
                                 "oferta y demanda globales PIB", "producto interno bruto trimestral"),
                   "incluir_alguno": ("pib", "producto interno bruto"),
                   "excluir": ("desestacionalizad", "corrientes", "dolar") + _EXCL_COMUN, "frecuencia": "trimestral"}},
@@ -131,7 +134,7 @@ CATALOGO: dict = {
         "cat": "Empleo", "fuente": "INDEC", "unidad": "Índice (oct 2016 = 100)",
         "indec": {"ids": ("149.1_TL_INDIIOS_OCTU_0_21",),
                   "busquedas": ("índice de salarios nivel general", "índice de salarios total"),
-                  "incluir": ("nivel general",), "incluir_alguno": ("salario",),
+                  "incluir_alguno": ("salario",),
                   "excluir": ("no registrado", "privado", "publico", "sector", "variacion"), "frecuencia": "mensual"}},
     NOM_SAL_N: {
         "cat": "Empleo", "fuente": "INDEC (cálculo propio)", "unidad": "Base 100",
@@ -159,13 +162,6 @@ CATALOGO: dict = {
     NOM_BM: {
         "cat": "Monetario", "fuente": "BCRA", "unidad": "Millones de pesos",
         "bcra": {"variable": {"incluir": ("base monetaria",), "preferir": ("total",)}}},
-    NOM_DEU: {
-        "cat": "Deuda", "fuente": "Ministerio de Economía (API de series)", "unidad": "Millones de USD",
-        "indec": {"ids": (), "fuente_clave": "",
-                  "busquedas": ("deuda bruta de la administración central millones de dólares",
-                                "stock de deuda bruta administración central"),
-                  "incluir": ("bruta",), "incluir_alguno": ("deuda",),
-                  "excluir": ("neta", "variacion", "porcentaje", "pib", "vencimiento", "servicios", "intereses")}},
 }
 
 
@@ -249,18 +245,35 @@ def _get_json(url: str, params: dict | None = None, intentos: int = 3):
 # BCRA
 # ----------------------------------------------------------------------------
 @_cache
-def bcra_listar_variables() -> list:
-    return _get_json(BCRA_VAR).get("results", [])
+def bcra_listar_variables():
+    """Devuelve (url_base, lista de variables). Prueba v4.0 y luego v3.0, y pagina el listado completo."""
+    ultimo = None
+    for base in BCRA_VAR_VERSIONES:
+        try:
+            res, offset = [], 0
+            while True:
+                j = _get_json(base, {"offset": offset, "limit": 1000})
+                lote = j.get("results", [])
+                res += lote
+                total = j.get("metadata", {}).get("resultset", {}).get("count", len(res))
+                offset += len(lote)
+                if not lote or offset >= total:
+                    break
+            if res:
+                return base, res
+        except DatosNoDisponibles as e:
+            ultimo = e
+    raise DatosNoDisponibles(f"No se pudo listar las variables del BCRA (v4.0 ni v3.0): {ultimo}")
 
 
 @_cache
-def bcra_descargar_variable(id_var: int, desde: str) -> pd.DataFrame:
+def bcra_descargar_variable(base: str, id_var: int, desde: str) -> pd.DataFrame:
     filas, offset = [], 0
     while True:
-        j = _get_json(f"{BCRA_VAR}/{id_var}", {"desde": desde, "limit": 3000, "offset": offset})
+        j = _get_json(f"{base}/{id_var}", {"desde": desde, "limit": 3000, "offset": offset})
         res = j.get("results", [])
         n = 0
-        for r in res:  # formato plano {fecha, valor} o anidado {detalle: [{fecha, valor}]}
+        for r in res:  # formato anidado {detalle: [{fecha, valor}]} (v4.0) o plano {fecha, valor} (v3.0)
             if "detalle" in r:
                 filas += [(d["fecha"], d["valor"]) for d in r["detalle"]]
                 n += len(r["detalle"])
@@ -304,17 +317,22 @@ def _resolver_bcra(nombre: str, ent: dict, desde: str):
 
     v = cfg.get("variable")
     if v:
+        base_url = BCRA_VAR_VERSIONES[0]
         try:
-            cands = [x for x in bcra_listar_variables()
+            base_url, lista = bcra_listar_variables()
+            cands = [x for x in lista
                      if _coincide(x.get("descripcion", ""), v.get("incluir", ()), (), v.get("excluir", ()))]
             pref = v.get("preferir", ())
-            cands.sort(key=lambda x: (-sum(_tiene(_norm(x.get("descripcion", "")), p) for p in pref), x.get("idVariable", 0)))
+            cands.sort(key=lambda x: (-int(_tiene(_norm(x.get("categoria", "")), "principales")),
+                                      -sum(_tiene(_norm(x.get("descripcion", "")), p) for p in pref),
+                                      x.get("idVariable", 0)))
         except Exception as e:
             cands = []
-            notas.append(f"No se pudo listar las variables del BCRA: {str(e)[:100]}")
+            notas.append(f"No se pudo listar las variables del BCRA: {str(e)[:200]}")
+        version = "v4.0" if "v4.0" in base_url else "v3.0"
         for x in cands[:3]:
             try:
-                df = bcra_descargar_variable(int(x["idVariable"]), desde)
+                df = bcra_descargar_variable(base_url, int(x["idVariable"]), desde)
             except Exception as e:
                 notas.append(f"variable {x.get('idVariable')}: error ({str(e)[:100]})")
                 continue
@@ -322,7 +340,7 @@ def _resolver_bcra(nombre: str, ent: dict, desde: str):
                 notas.append(f"variable {x.get('idVariable')}: sin datos")
                 continue
             info = info_de(df, f"BCRA variable {x['idVariable']}", x.get("descripcion", ""), "id",
-                           "BCRA - Principales Variables v3.0")
+                           f"BCRA - Principales Variables {version}")
             if not info["desactualizada"]:
                 return df, info
             notas.append(f"variable {x['idVariable']}: desactualizada (último dato {info['ultimo']})")
@@ -564,6 +582,45 @@ def inflacion_dic_dic(ipc: pd.Series) -> pd.Series:
     r = (dic.pct_change() * 100).dropna()
     r.index = r.index.year
     return r
+
+
+def candidatos(nombre: str, limite: int = 25) -> pd.DataFrame:
+    """Series candidatas para un indicador (sin aplicar el filtro de frescura), para elegir el id correcto a mano."""
+    ent = catalogo_total().get(nombre, {})
+    filas = []
+    if "bcra" in ent:
+        v = ent["bcra"].get("variable") or {}
+        try:
+            base, lista = bcra_listar_variables()
+            for x in lista:
+                if _coincide(x.get("descripcion", ""), v.get("incluir", ()), (), ()):
+                    filas.append({"id": x.get("idVariable"), "Título": str(x.get("descripcion"))[:110],
+                                  "Categoría": x.get("categoria"), "Periodicidad": x.get("periodicidad"),
+                                  "Hasta": x.get("ultFechaInformada"), "Fuente": "BCRA"})
+        except Exception as e:
+            filas.append({"id": "", "Título": f"Error al listar variables del BCRA: {str(e)[:150]}"})
+        return pd.DataFrame(filas).head(limite)
+    cfg = ent.get("indec")
+    if not cfg:
+        return pd.DataFrame()
+    vistos = set()
+    for q in cfg.get("busquedas", ()):
+        try:
+            res = buscar_series(q, limite)
+        except Exception as e:
+            filas.append({"id": "", "Título": f"Error en la búsqueda '{q}': {str(e)[:150]}"})
+            continue
+        for r in res:
+            if r["id"] in vistos:
+                continue
+            vistos.add(r["id"])
+            ok = _coincide(f"{r['titulo']} {r['corto']} {r['dataset']} {r.get('unidad') or ''}",
+                           cfg.get("incluir", ()), cfg.get("incluir_alguno", ()), cfg.get("excluir", ()))
+            filas.append({"id": r["id"], "Título": str(r["titulo"])[:110], "Unidad": r.get("unidad"),
+                          "Desde": r.get("desde"), "Hasta": r.get("hasta"), "Fuente": str(r.get("fuente"))[:35],
+                          "Pasa filtros": ok})
+    df = pd.DataFrame(filas)
+    return df.sort_values("Hasta", ascending=False) if "Hasta" in df.columns else df
 
 
 # ----------------------------------------------------------------------------
