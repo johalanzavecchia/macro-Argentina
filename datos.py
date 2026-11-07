@@ -95,7 +95,10 @@ CATALOGO: dict = {
         "derivada": {"tipo": "poder_adquisitivo", "ipc": NOM_IPC}},
     NOM_TC: {
         "cat": "Tipo de cambio", "fuente": "BCRA", "unidad": "$ por USD",
-        "bcra": {"variable": {"incluir": ("3500",), "excluir": ("minorista",)}, "cotizacion": "USD"}},
+        "bcra": {"variable": {"incluir": ("tipo de cambio",), "incluir_alguno": ("3500", "referencia", "mayorista"),
+                              "excluir": ("minorista", "implicito", "bna", "banco de la nacion"),
+                              "preferir": ("3500", "referencia", "mayorista")},
+                 "variable_id_respaldo": 5, "cotizacion": "USD"}},
     NOM_EMAE_D: {
         "cat": "Actividad", "fuente": "INDEC", "unidad": "Índice 2004 = 100",
         "indec": {"ids": ("143.3_NO_PR_2004_A_31",),
@@ -288,11 +291,12 @@ def bcra_descargar_variable(base: str, id_var: int, desde: str) -> pd.DataFrame:
 
 
 @_cache
-def bcra_descargar_cotizacion(moneda: str, desde: str) -> pd.DataFrame:
+def _cotizacion_ventana(moneda: str, d0: date, d1: date) -> list:
+    """Descarga una ventana de fechas de Estadísticas Cambiarias (con paginado)."""
     filas, offset = [], 0
     while True:
-        j = _get_json(f"{BCRA_COT}/{moneda}", {"fechadesde": desde, "fechahasta": date.today().isoformat(),
-                                               "limit": 500, "offset": offset})
+        j = _get_json(f"{BCRA_COT}/{moneda}", {"fechadesde": d0.isoformat(), "fechahasta": d1.isoformat(),
+                                               "limit": 1000, "offset": offset})
         res = j.get("results", [])
         for r in res:
             for d in r.get("detalle", []):
@@ -301,7 +305,22 @@ def bcra_descargar_cotizacion(moneda: str, desde: str) -> pd.DataFrame:
         total = j.get("metadata", {}).get("resultset", {}).get("count", len(res))
         offset += len(res)
         if not res or offset >= total:
-            break
+            return filas
+
+
+def bcra_descargar_cotizacion(moneda: str, desde: str) -> pd.DataFrame:
+    """Estadísticas Cambiarias: se pide por ventanas anuales (la API rechaza rangos muy largos)."""
+    hoy = date.today()
+    filas, errores, y = [], [], pd.Timestamp(desde).year
+    while y <= hoy.year:
+        d0, d1 = date(y, 1, 1), min(date(y, 12, 31), hoy)
+        try:
+            filas += _cotizacion_ventana(moneda, d0, d1)
+        except DatosNoDisponibles as e:
+            errores.append(f"{y}: {str(e)[:120]}")
+        y += 1
+    if not filas:
+        raise DatosNoDisponibles("Estadísticas Cambiarias sin datos. " + " | ".join(errores[:3]))
     return _a_df(filas)
 
 
@@ -321,7 +340,11 @@ def _resolver_bcra(nombre: str, ent: dict, desde: str):
         try:
             base_url, lista = bcra_listar_variables()
             cands = [x for x in lista
-                     if _coincide(x.get("descripcion", ""), v.get("incluir", ()), (), v.get("excluir", ()))]
+                     if _coincide(x.get("descripcion", ""), v.get("incluir", ()), v.get("incluir_alguno", ()),
+                                  v.get("excluir", ()))]
+            if not cands and cfg.get("variable_id_respaldo"):
+                cands = [{"idVariable": cfg["variable_id_respaldo"], "descripcion": nombre}]
+                notas.append("no se halló la variable por descripción: se prueba el id histórico de Principales Variables")
             pref = v.get("preferir", ())
             cands.sort(key=lambda x: (-int(_tiene(_norm(x.get("categoria", "")), "principales")),
                                       -sum(_tiene(_norm(x.get("descripcion", "")), p) for p in pref),
