@@ -129,7 +129,7 @@ CATALOGO: dict = {
         "indec": {"ids": ("45.2_ECTDT_0_T_33",),
                   "busquedas": ("tasa de desocupación total aglomerados urbanos EPH", "tasa de desocupación"),
                   "incluir_alguno": ("desocupaci", "desempleo"), "excluir": ("subocup", "variacion", "varones", "mujeres"),
-                  "frecuencia": "trimestral"}},
+                  "frecuencia": "trimestral", "proporcion_a_porcentaje": True}},
     NOM_SAL_RAW: {
         "cat": "Empleo", "fuente": "INDEC", "unidad": "Índice (oct 2016 = 100)",
         "indec": {"ids": ("149.1_TL_INDIIOS_OCTU_0_21",),
@@ -433,6 +433,10 @@ def _resolver_indec(nombre: str, ent: dict, desde: str):
         if df.empty:
             notas.append(f"{sid}: sin datos")
             return None
+        if cfg.get("proporcion_a_porcentaje") and float(df["valor"].max()) <= 1.5:
+            # La API publica esta serie como proporción (0,08 = 8%): se pasa a porcentaje
+            df = df.assign(valor=df["valor"] * 100)
+            notas.append("valores originales en proporción (0 a 1): se muestran multiplicados por 100 (en %)")
         frec = _frecuencia(df.index)
         atraso, es_vieja = _estado(df, frec)
         info = {**base, "frecuencia": frec, "fuente": base.get("fuente") or ent.get("fuente", ""),

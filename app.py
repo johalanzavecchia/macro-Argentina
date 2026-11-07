@@ -37,7 +37,7 @@ h1 span.acento {{ color: {MAGENTA_CLARO}; }}
 .kpi .t {{ color: {GRIS_CLARO}; font-size: 0.78rem; text-transform: uppercase; letter-spacing: .04em; }}
 .kpi .v {{ color: {BLANCO}; font-size: 1.6rem; font-weight: 700; }}
 .kpi .s {{ color: {GRIS_CLARO}; font-size: 0.75rem; }}
-.kpi .pos {{ color: #3DDC84; }} .kpi .neg {{ color: #FF4D4D; }} .kpi .alerta {{ color: #FFD23F; }}
+.kpi .alerta {{ color: #FFD23F; }}
 button[kind="primary"] {{ background: {MAGENTA}; border-color: {MAGENTA}; }}
 </style>
 """, unsafe_allow_html=True)
@@ -105,8 +105,8 @@ def estilo(fig: go.Figure, titulo: str = "", alto: int = 480, selector: bool = T
     return fig
 
 
-def kpi(titulo: str, valor: str, sub: str = "", signo: int = 0, alerta: bool = False):
-    clase = "alerta" if alerta else "pos" if signo > 0 else "neg" if signo < 0 else ""
+def kpi(titulo: str, valor: str, sub: str = "", alerta: bool = False):
+    clase = "alerta" if alerta else ""
     st.markdown(f'<div class="kpi"><div class="t">{titulo}</div><div class="v">{valor}</div>'
                 f'<div class="s {clase}">{sub}</div></div>', unsafe_allow_html=True)
 
@@ -187,13 +187,20 @@ with tab_pan:
                 vieja = info.get("desactualizada") or info.get("revisar")
                 if vieja:
                     sub += " (revisar serie)"
-                signo = 0 if (prev is None or u == "%") else (1 if ultimo > prev else -1 if ultimo < prev else 0)
-                kpi(etiqueta, texto, sub, signo, alerta=bool(vieja))
+                if prev is not None:
+                    if u == "%":   # la serie ya es una tasa: la diferencia se mide en puntos porcentuales
+                        d, medida = ultimo - prev, "p.p."
+                    else:          # nivel: variación porcentual respecto del dato anterior
+                        d, medida = ((ultimo / prev - 1) * 100 if prev else 0.0), "%"
+                    flecha = "▲" if d > 0 else "▼" if d < 0 else "▬"
+                    sub += f"<br>{flecha} {fmt(abs(d))} {medida} vs. dato anterior"
+                kpi(etiqueta, texto, sub, alerta=bool(vieja))
             except Exception:
                 kpi(etiqueta, "s/d", "no disponible")
     barra.empty()
     st.caption("Los indicadores en variación interanual comparan con el mismo período del año anterior. "
-               "El detalle de cada serie usada está en 'Explorador y fuentes'.")
+               "La flecha muestra el cambio respecto del dato anterior: en puntos porcentuales (p.p.) para las tasas "
+               "y en % para los valores. El detalle de cada serie usada está en 'Explorador y fuentes'.")
 
 # ----------------------------------------------------------------------------
 # Inflación: nominal vs. real
